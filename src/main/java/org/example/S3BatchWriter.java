@@ -25,6 +25,15 @@ public class S3BatchWriter extends SequentiallyBufferedBatcher<byte[], Void> {
     private final S3Client s3Client;
     private final String bucketName;
 
+    /**
+     * Write data to S3 blob asynchronously. Returns precomputed location and a completable future.
+     * @param data data to write
+     * @return precomputed location in S3 blob, and a response future tracking the end result
+     */
+    public BatchEntry<Void> precomputeLocationAndWriteAsync(final byte[] data) {
+        return handleAsync(data);
+    }
+
     @Override
     protected List<Result<Void>> handleBatch(final List<byte[]> requests, final String batchName) {
         final int totalSize = requests.stream().mapToInt(request -> request.length).sum();

@@ -10,6 +10,7 @@ import software.amazon.awssdk.enhanced.dynamodb.model.WriteBatch;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -30,6 +31,22 @@ public class DynamoDbBatchWriter<T> extends SequentiallyBufferedBatcher<T, Void>
     private final DynamoDbEnhancedClient dynamoDbEnhancedClient;
     private final Class<T> itemClass;
     private final DynamoDbTable<T> table;
+
+    /**
+     * Put item into DynamoDB table and wait for the batch to complete, or throw.
+     * @param item item to put
+     */
+    public void putItem(final T item) {
+        try {
+            handleAsync(item).response().join();
+        } catch (final CompletionException e) {
+            if (e.getCause() instanceof RuntimeException) {
+                throw (RuntimeException) e.getCause();
+            } else {
+                throw new RuntimeException(e.getCause());
+            }
+        }
+    }
 
     @Override
     protected List<Result<Void>> handleBatch(final List<T> requests, final String batchName) {
