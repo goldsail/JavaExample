@@ -36,25 +36,24 @@ public class DynamoDbBatchWriter<T> extends SequentiallyBufferedBatcher<T, Void>
 
         List<T> unprocessedItems = requests;
         int attempt = 0;
+        Exception lastSeenException = null;
         while (attempt < MAX_ATTEMPTS && !unprocessedItems.isEmpty()) {
             if (attempt > 0) {
                 sleepWithInterruption(ThreadLocalRandom.current().nextInt(RETRY_DELAY_MIN, RETRY_DELAY_MAX));
             }
             attempt++;
-            //
-            final WriteBatch.Builder<T> writeBatch = WriteBatch.builder(itemClass).mappedTableResource(table);
-            unprocessedItems.stream().forEach(writeBatch::addPutItem);
-            final BatchWriteItemEnhancedRequest request = BatchWriteItemEnhancedRequest.builder()
-                    .writeBatches(writeBatch.build())
-                    .build();
-            final BatchWriteResult response = dynamoDbEnhancedClient.batchWriteItem(request);
-            unprocessedItems = response.unprocessedPutItemsForTable(table);
+            try {
+                unprocessedItems = batchWriteItems(unprocessedItems);
+            } catch (final Exception e) {
+                lastSeenException = e;
+            }
         }
 
         final Set<T> unprocessedItemsAfterMaxRetry = Set.copyOf(unprocessedItems);
+        final Exception cause = lastSeenException;
         return requests.stream().map(request -> {
             if (unprocessedItemsAfterMaxRetry.contains(request)) {
-                final RuntimeException exception = new RuntimeException("Failed to write request " + request);
+                final RuntimeException exception = new RuntimeException("Failed to write request " + request, cause);
                 return new Result<Void>(null, exception);
             } else {
                 return new Result<Void>(null, null);
@@ -80,5 +79,15 @@ public class DynamoDbBatchWriter<T> extends SequentiallyBufferedBatcher<T, Void>
     @Override
     protected String generateBatchName() {
         return "not used";
+    }
+
+    private List<T> batchWriteItems(final List<T> itemsToProcess) {
+        final WriteBatch.Builder<T> writeBatch = WriteBatch.builder(itemClass).mappedTableResource(table);
+        itemsToProcess.stream().forEach(writeBatch::addPutItem);
+        final BatchWriteItemEnhancedRequest request = BatchWriteItemEnhancedRequest.builder()
+                .writeBatches(writeBatch.build())
+                .build();
+        final BatchWriteResult response = dynamoDbEnhancedClient.batchWriteItem(request);
+        return response.unprocessedPutItemsForTable(table);
     }
 }
