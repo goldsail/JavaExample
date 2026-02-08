@@ -1,15 +1,29 @@
 package org.example;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class SequentiallyBufferedBatcherTest {
 
@@ -21,27 +35,25 @@ class SequentiallyBufferedBatcherTest {
 
     static final int MAX_BATCH_SIZE = 25;
     static final int BATCH_TIMEOUT_MILLIS = 50;
+    static final int MAX_ALLOWED_GC_PAUSE = 500;
     static final int MIN_SIMULATED_LATENCY_MILLIS = 5;
     static final int MAX_SIMULATED_LATENCY_MILLIS = 10;
     static final int UNLUCKY_USER_ID = 12345;
 
-    static class BatchRequestHandlerForTesting {
+    static class TestClass extends SequentiallyBufferedBatcher<Request, Response> {
 
         /**
          * Batch API to fetch username from user id. It simulates request latency and transient errors.
          * @param requests a batch of requests (user ids)
+         * @param batchName batch name
          * @return return success or failure for each user id, or
          *         occasionally, for user id {@link #UNLUCKY_USER_ID}, throw exception to fail entire batch
          */
-        static List<SequentiallyBufferedBatcher.Result<Response>> batchFetchUser(final List<Request> requests) {
+        @Override
+        protected List<SequentiallyBufferedBatcher.Result<Response>> handleBatch(final List<Request> requests, final String batchName) {
 
-            try {
-                // Simulate network request latency with small jitter.
-                Thread.sleep(ThreadLocalRandom.current().nextInt(MIN_SIMULATED_LATENCY_MILLIS, MAX_SIMULATED_LATENCY_MILLIS));
-            } catch (final InterruptedException e) {
-                fail("Interrupted unexpectedly! Batched requests: " + requests);
-                Thread.currentThread().interrupt();
-            }
+            // Simulate network request latency with small jitter.
+            sleepWithInterruption(ThreadLocalRandom.current().nextInt(MIN_SIMULATED_LATENCY_MILLIS, MAX_SIMULATED_LATENCY_MILLIS));
 
             if (requests.isEmpty()) {
                 fail("SequentiallyBufferedBatcher should never invoke an empty batch");
@@ -68,23 +80,50 @@ class SequentiallyBufferedBatcherTest {
         }
 
         /**
+         * Treat all requests of the same size 1. That is, count how many requests.
+         * @param request request
+         * @return 1
+         */
+        @Override
+        protected long measureSize(final Request request) {
+            return 1;
+        }
+
+        /**
          * Decides if the batch is full and ready to flush
-         * @param requests a batch of requests (user ids)
+         * @param currentBatchOffset a batch of requests (user ids)
          * @return check if the batch size has reached {@link #MAX_BATCH_SIZE}
          */
-        static boolean shouldFlush(final List<Request> requests) {
-            return requests.size() >= MAX_BATCH_SIZE;
+        @Override
+        protected boolean shouldFlush(final long currentBatchOffset) {
+            return currentBatchOffset >= MAX_BATCH_SIZE;
+        }
+
+        /**
+         * {@inheritDoc}
+         */
+        @Override
+        protected Duration provideBatchTimeout() {
+            return Duration.ofMillis(BATCH_TIMEOUT_MILLIS);
+        }
+
+        /**
+         * {@inheritDoc}
+         */
+        @Override
+        protected String generateBatchName() {
+            return UUID.randomUUID().toString();
         }
     }
 
     @BeforeEach
     void setUp() {
-        final ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
-        target = new SequentiallyBufferedBatcher<>(
-                BatchRequestHandlerForTesting::batchFetchUser,
-                BatchRequestHandlerForTesting::shouldFlush,
-                Duration.ofMillis(BATCH_TIMEOUT_MILLIS),
-                executorService);
+        target = new TestClass();
+    }
+
+    @AfterEach
+    void tearDown() {
+        target.close();
     }
 
     @ParameterizedTest
@@ -97,7 +136,7 @@ class SequentiallyBufferedBatcherTest {
             // 1. Make a lot of individual requests using 100 threads. Record the result.
             IntStream.range(0, totalRequests).forEach(userId -> executorService.submit(() -> {
                 final Request request = new Request(userId);
-                target.handleAsync(request).whenComplete((response, error) -> {
+                target.handleAsync(request).response().whenComplete((response, error) -> {
                     if (error != null) {
                         results.put(request.userId, new SequentiallyBufferedBatcher.Result<>(null, (Exception) error));
                     } else {
@@ -107,9 +146,9 @@ class SequentiallyBufferedBatcherTest {
             }));
 
             // 2. Test the latency SLA. Latency should not exceed the batch timeout plus the max request latency.
-            Thread.sleep(BATCH_TIMEOUT_MILLIS + MAX_SIMULATED_LATENCY_MILLIS + 15);
+            Thread.sleep(BATCH_TIMEOUT_MILLIS + MAX_SIMULATED_LATENCY_MILLIS + MAX_ALLOWED_GC_PAUSE);
             executorService.shutdown();
-            if (!executorService.awaitTermination(15, TimeUnit.MILLISECONDS)) {
+            if (!executorService.awaitTermination(MAX_ALLOWED_GC_PAUSE, TimeUnit.MILLISECONDS)) {
                 executorService.shutdownNow();
                 fail("Potential dead lock detected.");
             }
