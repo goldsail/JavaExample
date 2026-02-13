@@ -9,7 +9,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
@@ -45,12 +44,11 @@ class SequentiallyBufferedBatcherTest {
         /**
          * Batch API to fetch username from user id. It simulates request latency and transient errors.
          * @param requests a batch of requests (user ids)
-         * @param batchName batch name
          * @return return success or failure for each user id, or
          *         occasionally, for user id {@link #UNLUCKY_USER_ID}, throw exception to fail entire batch
          */
         @Override
-        protected List<SequentiallyBufferedBatcher.Result<Response>> handleBatch(final List<Request> requests, final String batchName) {
+        protected List<SequentiallyBufferedBatcher.Result<Response>> handleBatch(final List<Request> requests) {
 
             // Simulate network request latency with small jitter.
             sleepWithInterruption(ThreadLocalRandom.current().nextInt(MIN_SIMULATED_LATENCY_MILLIS, MAX_SIMULATED_LATENCY_MILLIS));
@@ -80,23 +78,13 @@ class SequentiallyBufferedBatcherTest {
         }
 
         /**
-         * Treat all requests of the same size 1. That is, count how many requests.
-         * @param request request
-         * @return 1
-         */
-        @Override
-        protected long measureSize(final Request request) {
-            return 1;
-        }
-
-        /**
          * Decides if the batch is full and ready to flush
-         * @param currentBatchOffset a batch of requests (user ids)
+         * @param requests a batch of requests (user ids)
          * @return check if the batch size has reached {@link #MAX_BATCH_SIZE}
          */
         @Override
-        protected boolean shouldFlush(final long currentBatchOffset) {
-            return currentBatchOffset >= MAX_BATCH_SIZE;
+        protected boolean shouldFlush(final List<Request> requests) {
+            return requests.size() >= MAX_BATCH_SIZE;
         }
 
         /**
@@ -105,14 +93,6 @@ class SequentiallyBufferedBatcherTest {
         @Override
         protected Duration provideBatchTimeout() {
             return Duration.ofMillis(BATCH_TIMEOUT_MILLIS);
-        }
-
-        /**
-         * {@inheritDoc}
-         */
-        @Override
-        protected String generateBatchName() {
-            return UUID.randomUUID().toString();
         }
     }
 
@@ -136,7 +116,7 @@ class SequentiallyBufferedBatcherTest {
             // 1. Make a lot of individual requests using 100 threads. Record the result.
             IntStream.range(0, totalRequests).forEach(userId -> executorService.submit(() -> {
                 final Request request = new Request(userId);
-                target.handleAsync(request).response().whenComplete((response, error) -> {
+                target.handleAsync(request).whenComplete((response, error) -> {
                     if (error != null) {
                         results.put(request.userId, new SequentiallyBufferedBatcher.Result<>(null, (Exception) error));
                     } else {

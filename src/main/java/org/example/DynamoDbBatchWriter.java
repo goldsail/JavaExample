@@ -38,7 +38,7 @@ public class DynamoDbBatchWriter<T> extends SequentiallyBufferedBatcher<T, Void>
      */
     public void putItem(final T item) {
         try {
-            handleAsync(item).response().join();
+            handleAsync(item).join();
         } catch (final CompletionException e) {
             if (e.getCause() instanceof RuntimeException) {
                 throw (RuntimeException) e.getCause();
@@ -49,7 +49,7 @@ public class DynamoDbBatchWriter<T> extends SequentiallyBufferedBatcher<T, Void>
     }
 
     @Override
-    protected List<Result<Void>> handleBatch(final List<T> requests, final String batchName) {
+    protected List<Result<Void>> handleBatch(final List<T> requests) {
 
         List<T> unprocessedItems = requests;
         int attempt = 0;
@@ -79,23 +79,13 @@ public class DynamoDbBatchWriter<T> extends SequentiallyBufferedBatcher<T, Void>
     }
 
     @Override
-    protected long measureSize(final T request) {
-        return 1;
-    }
-
-    @Override
-    protected boolean shouldFlush(final long currentBatchOffset) {
-        return currentBatchOffset >= MAX_BATCH_SIZE;
+    protected boolean shouldFlush(final List<T> requests) {
+        return requests.size() >= MAX_BATCH_SIZE;
     }
 
     @Override
     protected Duration provideBatchTimeout() {
         return TIMEOUT_TO_FLUSH;
-    }
-
-    @Override
-    protected String generateBatchName() {
-        return "not used";
     }
 
     private List<T> batchWriteItems(final List<T> itemsToProcess) {
